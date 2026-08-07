@@ -134,11 +134,17 @@ else:
 
         session = requests.Session()
 
-        # Browser-like headers matching the captured request.
-        headers = {
+        # Parse the browser cookie into the requests cookie jar.
+        # This is more reliable than sending a static Cookie header because
+        # Chartink/Laravel can refresh the session and XSRF cookies.
+        for part in cookie_header.split(";"):
+            if "=" in part:
+                name, value = part.strip().split("=", 1)
+                session.cookies.set(name, value, domain="chartink.com", path="/")
+
+        base_headers = {
             "Accept": "*/*",
             "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-            "Content-Type": "application/json",
             "Origin": "https://chartink.com",
             "Referer": referer_url.strip(),
             "User-Agent": (
@@ -146,18 +152,40 @@ else:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/150.0.0.0 Safari/537.36"
             ),
-            "X-Requested-With": "XMLHttpRequest",
         }
 
-        # Chartink expects the XSRF token from the XSRF-TOKEN cookie.
-        xsrf_raw = _cookie_value(cookie_header, "XSRF-TOKEN")
-        xsrf_token = unquote(xsrf_raw)
+        # FIRST: open the scanner page with the authorized session.
+        # This lets Chartink refresh/validate ci_session and XSRF-TOKEN
+        # before the POST. A 419 normally means CSRF/session mismatch.
+        page = session.get(
+            referer_url.strip(),
+            headers=base_headers,
+            timeout=30,
+        )
 
-        if xsrf_token:
-            headers["X-XSRF-TOKEN"] = xsrf_token
+        if page.status_code in (401, 403):
+            raise RuntimeError(
+                f"Chartink rejected the browser session while opening the scanner "
+                f"(HTTP {page.status_code}). Capture a fresh authorized cookie."
+            )
 
-        # Keep the browser's authorized cookie header exactly as supplied.
-        headers["Cookie"] = cookie_header.strip()
+        page.raise_for_status()
+
+        # Use the CURRENT XSRF cookie from the refreshed requests session.
+        xsrf_token = session.cookies.get("XSRF-TOKEN", "")
+        xsrf_token = unquote(xsrf_token)
+
+        if not xsrf_token:
+            raise RuntimeError(
+                "Chartink did not return a fresh XSRF-TOKEN after opening the scanner."
+            )
+
+        post_headers = {
+            **base_headers,
+            "Content-Type": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-XSRF-TOKEN": xsrf_token,
+        }
 
         payload = {
             "scan_clause": scan_clause,
@@ -167,16 +195,24 @@ else:
 
         response = session.post(
             "https://chartink.com/screener/process",
-            headers=headers,
+            headers=post_headers,
             json=payload,
             timeout=30,
         )
 
+        if response.status_code == 419:
+            raise RuntimeError(
+                "Chartink returned HTTP 419 (CSRF/session mismatch). "
+                "The app now refreshes the scanner page before POSTing, but "
+                "your authorized Chartink session may still be expired or "
+                "bound to the browser session. Capture a fresh Cookie and "
+                "update CHARTINK_COOKIE."
+            )
+
         if response.status_code in (401, 403):
             raise RuntimeError(
                 f"Chartink rejected the session (HTTP {response.status_code}). "
-                "Log out/in to Chartink, capture a fresh authorized Cookie, "
-                "then update CHARTINK_COOKIE."
+                "Capture a fresh authorized Cookie from the same logged-in browser."
             )
 
         response.raise_for_status()
