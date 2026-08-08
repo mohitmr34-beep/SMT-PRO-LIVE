@@ -2,8 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import requests
-import re
-import html as html_lib
+from urllib.parse import unquote
 
 # -------------------------------
 # APP CONFIG
@@ -21,7 +20,7 @@ source = st.radio(
 )
 
 # -------------------------------
-# CSV MODE
+# CSV MODE (UNCHANGED)
 # -------------------------------
 if source == "📂 Manual CSV (OLD)":
 
@@ -42,128 +41,90 @@ if source == "📂 Manual CSV (OLD)":
         ]
 
 # -------------------------------
-# CHARTINK LIVE MODE
+# CHARTINK LIVE MODE (FINAL FIX)
 # -------------------------------
 else:
 
     st.subheader("🟢 Chartink LIVE Scanner")
 
-    chartink_url = st.text_input(
-        "Chartink Scanner URL",
-        "https://chartink.com/screener/master-scanner-18062057"
-    )
-
-    # 🔥 NEW: COOKIE INPUT
     chartink_cookie = st.text_input(
-        "🔐 Chartink Cookie (Recommended)",
-        type="password",
-        help="Paste browser cookie for accurate results"
+        "🔐 Chartink Cookie (REQUIRED)",
+        type="password"
     )
 
-    @st.cache_data(ttl=20, show_spinner=False)
-    def get_chartink_symbols(url, cookie=None):
+    @st.cache_data(ttl=20)
+    def get_chartink_symbols(cookie):
+
+        if not cookie:
+            raise Exception("Chartink cookie required")
 
         session = requests.Session()
 
-        # ✅ Apply cookie if provided
-        if cookie:
-            for part in cookie.split(";"):
-                if "=" in part:
-                    k, v = part.strip().split("=", 1)
-                    session.cookies.set(k, v, domain="chartink.com")
+        # Load cookie
+        for part in cookie.split(";"):
+            if "=" in part:
+                k, v = part.strip().split("=", 1)
+                session.cookies.set(k, v, domain="chartink.com")
+
+        # Step 1: refresh session
+        session.get("https://chartink.com")
+
+        xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
+
+        if not xsrf:
+            raise Exception("XSRF token missing → refresh cookie")
 
         headers = {
             "User-Agent": "Mozilla/5.0",
-            "Accept": "text/html",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-XSRF-TOKEN": xsrf,
+            "Content-Type": "application/json",
             "Referer": "https://chartink.com/"
         }
 
-        # Step 1: Open page
-        page = session.get(url.strip(), headers=headers, timeout=20)
-        page.raise_for_status()
-
-        html = page.text
-
-        # Step 2: Extract scan_clause
-        scan_clause = None
-        patterns = [
-            r'"scan_clause"\s*:\s*"((?:\\.|[^"\\])*)"',
-            r"'scan_clause'\s*:\s*'((?:\\.|[^'\\])*)'"
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, html, re.I | re.S)
-            if match:
-                scan_clause = match.group(1)
-                break
-
-        if not scan_clause:
-            decoded = html_lib.unescape(html)
-            for pattern in patterns:
-                match = re.search(pattern, decoded, re.I | re.S)
-                if match:
-                    scan_clause = match.group(1)
-                    break
-
-        if not scan_clause:
-            raise RuntimeError("Scan clause not found (use cookie)")
-
-        scan_clause = scan_clause.replace("\\/", "/").replace('\\"', '"')
-
-        # Step 3: POST request
-        process_headers = {
-            "User-Agent": "Mozilla/5.0",
-            "X-Requested-With": "XMLHttpRequest",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Referer": url.strip()
+        # 🔥 YOUR EXACT SCAN LOGIC (WORKING)
+        payload = {
+            "scan_clause": "( {cash} ( ( {cash} ( ( {cash} (  daily close >= daily max( 252 , daily high ) * 0.98 and daily volume > daily sma( daily volume , 20 ) * 1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max( 252 , daily high ) and daily close < daily open and daily volume > daily sma( daily volume , 20 ) * 1.5 ) ) or ( {cash} ( daily open > 1 day ago close * 1.02 and daily volume > daily sma( daily volume , 20 ) * 2 and daily close > daily open ) ) ) ) ) )"
         }
 
-        response = session.post(
+        res = session.post(
             "https://chartink.com/screener/process",
-            data={"scan_clause": scan_clause},
-            headers=process_headers,
-            timeout=20
+            headers=headers,
+            json=payload
         )
 
-        response.raise_for_status()
-        payload = response.json()
+        if res.status_code == 419:
+            raise Exception("Session expired → update cookie")
 
-        rows = payload.get("data", [])
+        if res.status_code != 200:
+            raise Exception(f"Chartink error {res.status_code}")
 
-        symbols_out = []
-        for row in rows:
-            raw = (
-                row.get("nsecode")
-                or row.get("symbol")
-                or row.get("Symbol")
-            )
+        data = res.json().get("data", [])
 
-            if raw:
-                sym = str(raw).strip().upper()
-                if not sym.endswith(".NS"):
-                    sym = sym + ".NS"
+        symbols = []
+        for row in data:
+            sym = row.get("nsecode")
+            if sym:
+                symbols.append(sym.upper() + ".NS")
 
-                if sym not in symbols_out:
-                    symbols_out.append(sym)
+        if not symbols:
+            raise Exception("No stocks returned")
 
-        if not symbols_out:
-            raise RuntimeError("No stocks returned from Chartink")
-
-        return symbols_out
+        return symbols
 
     if st.button("🔄 Get LIVE Chartink Stocks"):
         try:
-            symbols = get_chartink_symbols(chartink_url, chartink_cookie)
-            st.session_state["chartink_symbols"] = symbols
+            symbols = get_chartink_symbols(chartink_cookie)
+            st.session_state["symbols"] = symbols
             st.success(f"Loaded {len(symbols)} stocks")
         except Exception as e:
             st.error(f"Chartink LIVE fetch failed: {e}")
             st.stop()
 
-    elif "chartink_symbols" in st.session_state:
-        symbols = st.session_state["chartink_symbols"]
+    elif "symbols" in st.session_state:
+        symbols = st.session_state["symbols"]
     else:
-        st.info("Click button to load Chartink stocks")
+        st.info("Enter cookie → Click button")
         st.stop()
 
     st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
@@ -186,11 +147,10 @@ def get_data(symbol, timeframe):
 
         df = df.dropna()
 
-        if not all(col in df.columns for col in ["Open", "High", "Low", "Close"]):
+        if not all(col in df.columns for col in ["Open","High","Low","Close"]):
             return None
 
         return df
-
     except:
         return None
 
@@ -216,18 +176,21 @@ def analyze_stock(df):
     signal = "WAIT"
     entry = sl = target = None
 
+    # ATH Breakout
     if close >= 0.98 * high_52 and close > open_:
         signal = "BUY"
         entry = high
         sl = low
         target = entry + (entry - sl) * 2
 
+    # ATH Rejection
     elif high >= high_52 and close < open_:
         signal = "SELL"
         entry = low
         sl = high
         target = entry - (sl - entry) * 2
 
+    # Gap Momentum
     elif open_ > prev_close * 1.02:
         if close > open_:
             signal = "BUY"
@@ -264,7 +227,7 @@ if st.button("🚀 Run AI Scanner"):
     st.subheader("📊 All Results")
     st.dataframe(df_results, use_container_width=True)
 
-    best = df_results[df_results["Signal"].isin(["BUY", "SELL"])].head(2)
+    best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
 
     st.subheader("🔥 Top 2 Trades")
     st.dataframe(best, use_container_width=True)
