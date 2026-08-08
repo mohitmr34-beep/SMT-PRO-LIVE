@@ -3,12 +3,23 @@ import yfinance as yf
 import pandas as pd
 import requests
 from urllib.parse import unquote
+import time
 
 # -------------------------------
 # APP CONFIG
 # -------------------------------
 st.set_page_config(page_title="SMT PRO AI Scanner", layout="wide")
-st.title("📊 SMT PRO AI Trading Scanner (CSV Enabled)")
+st.title("📊 SMT PRO AI Trading Scanner (LIVE + CSV)")
+
+# -------------------------------
+# AUTO REFRESH (5 MIN)
+# -------------------------------
+auto_refresh = st.checkbox("⏱️ Auto Refresh (5 min)", value=False)
+
+if auto_refresh:
+    st.caption("🔄 Auto refresh every 5 minutes running...")
+    time.sleep(300)
+    st.rerun()
 
 # -------------------------------
 # STOCK SOURCE
@@ -19,9 +30,9 @@ source = st.radio(
     horizontal=True
 )
 
-# -------------------------------
-# CSV MODE (UNCHANGED)
-# -------------------------------
+# ===============================
+# CSV MODE (UNCHANGED SAFE)
+# ===============================
 if source == "📂 Manual CSV (OLD)":
 
     uploaded_file = st.file_uploader("📂 Upload Stock List CSV", type=["csv"])
@@ -40,27 +51,27 @@ if source == "📂 Manual CSV (OLD)":
             "SBIN.NS","LT.NS","AXISBANK.NS","KOTAKBANK.NS","ITC.NS"
         ]
 
-# -------------------------------
+# ===============================
 # CHARTINK LIVE MODE (FINAL FIX)
-# -------------------------------
+# ===============================
 else:
 
     st.subheader("🟢 Chartink LIVE Scanner")
 
     chartink_cookie = st.text_input(
-        "🔐 Chartink Cookie (REQUIRED)",
+        "🔐 Enter Chartink Cookie",
         type="password"
     )
 
-    @st.cache_data(ttl=20)
+    @st.cache_data(ttl=30)
     def get_chartink_symbols(cookie):
 
         if not cookie:
-            raise Exception("Chartink cookie required")
+            raise Exception("❌ Cookie required")
 
         session = requests.Session()
 
-        # Load cookie
+        # Load cookie into session
         for part in cookie.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
@@ -72,7 +83,7 @@ else:
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
         if not xsrf:
-            raise Exception("XSRF token missing → refresh cookie")
+            raise Exception("❌ XSRF token missing (update cookie)")
 
         headers = {
             "User-Agent": "Mozilla/5.0",
@@ -82,7 +93,7 @@ else:
             "Referer": "https://chartink.com/"
         }
 
-        # 🔥 YOUR EXACT SCAN LOGIC (WORKING)
+        # 🔥 FINAL SCAN LOGIC (YOUR STRATEGY)
         payload = {
             "scan_clause": "( {cash} ( ( {cash} ( ( {cash} (  daily close >= daily max( 252 , daily high ) * 0.98 and daily volume > daily sma( daily volume , 20 ) * 1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max( 252 , daily high ) and daily close < daily open and daily volume > daily sma( daily volume , 20 ) * 1.5 ) ) or ( {cash} ( daily open > 1 day ago close * 1.02 and daily volume > daily sma( daily volume , 20 ) * 2 and daily close > daily open ) ) ) ) ) )"
         }
@@ -94,10 +105,10 @@ else:
         )
 
         if res.status_code == 419:
-            raise Exception("Session expired → update cookie")
+            raise Exception("❌ Session expired → update cookie")
 
         if res.status_code != 200:
-            raise Exception(f"Chartink error {res.status_code}")
+            raise Exception(f"❌ Chartink error {res.status_code}")
 
         data = res.json().get("data", [])
 
@@ -108,23 +119,26 @@ else:
                 symbols.append(sym.upper() + ".NS")
 
         if not symbols:
-            raise Exception("No stocks returned")
+            raise Exception("❌ No stocks returned")
 
         return symbols
 
-    if st.button("🔄 Get LIVE Chartink Stocks"):
+    # BUTTON
+    if st.button("🔄 Get LIVE Stocks"):
+
         try:
             symbols = get_chartink_symbols(chartink_cookie)
             st.session_state["symbols"] = symbols
-            st.success(f"Loaded {len(symbols)} stocks")
+            st.success(f"✅ {len(symbols)} stocks loaded")
+
         except Exception as e:
-            st.error(f"Chartink LIVE fetch failed: {e}")
+            st.error(f"{e}")
             st.stop()
 
     elif "symbols" in st.session_state:
         symbols = st.session_state["symbols"]
     else:
-        st.info("Enter cookie → Click button")
+        st.info("Enter cookie → Click 'Get LIVE Stocks'")
         st.stop()
 
     st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
@@ -151,6 +165,7 @@ def get_data(symbol, timeframe):
             return None
 
         return df
+
     except:
         return None
 
