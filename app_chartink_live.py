@@ -54,7 +54,7 @@ else:
     )
 
     chartink_cookie = st.text_input(
-        "Chartink Cookie",
+        "Chartink Cookie (required)",
         type="password"
     )
 
@@ -68,10 +68,14 @@ else:
     )
 
     @st.cache_data(ttl=20)
-    def get_chartink_symbols(cookie):
+    def get_chartink_symbols(cookie, url):
+
+        if not cookie:
+            raise Exception("Chartink cookie required")
 
         session = requests.Session()
 
+        # Load cookies
         for part in cookie.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
@@ -79,17 +83,21 @@ else:
 
         headers = {
             "User-Agent": "Mozilla/5.0",
-            "Referer": chartink_url
+            "Referer": url
         }
 
-        # open page
-        session.get(chartink_url, headers=headers)
+        # Step 1: Open scanner page
+        session.get(url, headers=headers)
 
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
+        if not xsrf:
+            raise Exception("XSRF token missing. Refresh cookie.")
+
         headers.update({
             "X-Requested-With": "XMLHttpRequest",
-            "X-XSRF-TOKEN": xsrf
+            "X-XSRF-TOKEN": xsrf,
+            "Content-Type": "application/json"
         })
 
         payload = {
@@ -104,6 +112,145 @@ else:
             json=payload
         )
 
+        if res.status_code == 419:
+            raise Exception("Session expired (419). Use fresh cookie.")
+
+        if res.status_code != 200:
+            raise Exception(f"Chartink error {res.status_code}")
+
+        data = res.json().get("data", [])
+
+        symbols = []
+        for row in data:
+            sym = row.get("nsecode")
+            if sym:
+                symbols.append(sym.upper() + ".NS")
+
+        if not symbols:
+            raise Exception("No stocks returned from Chartink")
+
+        return symbols
+
+    if st.button("🔄 Get LIVE Stocks"):
+        try:
+            symbols = get_chartink_symbols(chartink_cookie, chartink_url)
+            st.session_state["symbols"] = symbols
+            st.success(f"Loaded {len(symbols)} stocks")
+        except Exception as e:
+            st.error(f"Chartink LIVE fetch failed: {e}")
+            st.stop()
+
+    elif "symbols" in st.session_state:
+        symbols = st.session_state["symbols"]
+    else:
+        st.info("Enter cookie → Click 'Get LIVE Stocks'")
+        st.stop()
+
+    st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
+
+# -------------------------------
+# TIMEFRAME
+# -------------------------------
+timeframe = st.selectbox("Select Timeframe", ["5m", "15m", "1d"])
+
+# -------------------------------
+# DATA FETCH
+# -------------------------------
+@st.cache_data
+def get_data(symbol, timeframe):
+    try:
+        df = yf.download(symbol, period="5d", interval=timeframe, progress=False)
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df = df.dropna()
+
+        if not all(col in df.columns for col in ["Open","High","Low","Close"]):
+            return None
+
+        return df
+    except:
+        return None
+
+# -------------------------------
+# AI LOGIC (UNCHANGED)
+# -------------------------------
+def analyze_stock(df):
+
+    if df is None or len(df) < 50:
+        return "NO DATA", None, None, None
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    close = latest["Close"]
+    open_ = latest["Open"]
+    high = latest["High"]
+    low = latest["Low"]
+    prev_close = prev["Close"]
+
+    high_52 = df["High"].rolling(252).max().iloc[-1]
+
+    signal = "WAIT"
+    entry = sl = target = None
+
+    if close >= 0.98 * high_52 and close > open_:
+        signal = "BUY"
+        entry = high
+        sl = low
+        target = entry + (entry - sl) * 2
+
+    elif high >= high_52 and close < open_:
+        signal = "SELL"
+        entry = low
+        sl = high
+        target = entry - (sl - entry) * 2
+
+    elif open_ > prev_close * 1.02:
+        signal = "BUY" if close > open_ else "SELL"
+        entry = high if signal == "BUY" else low
+        sl = low if signal == "BUY" else high
+        target = entry + (entry - sl) * 2 if signal == "BUY" else entry - (sl - entry) * 2
+
+    return signal, entry, sl, target
+
+# -------------------------------
+# RUN SCANNER
+# -------------------------------
+if st.button("🚀 Run AI Scanner"):
+
+    results = []
+
+    for sym in symbols:
+        df = get_data(sym, timeframe)
+        signal, entry, sl, target = analyze_stock(df)
+
+        results.append({
+            "Stock": sym,
+            "Signal": signal,
+            "Entry": round(entry,2) if entry else None,
+            "SL": round(sl,2) if sl else None,
+            "Target": round(target,2) if target else None
+        })
+
+    df_results = pd.DataFrame(results)
+
+    st.subheader("📊 All Results")
+    st.dataframe(df_results, use_container_width=True)
+
+    best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
+
+    st.subheader("🔥 Top 2 Trades")
+    st.dataframe(best, use_container_width=True)
+
+    if best.empty:
+        st.warning("No high-probability trades found.")
+
+# -------------------------------
+# FOOTER
+# -------------------------------
+st.caption("⚠️ Educational use only. Confirm with live market before trading.")
         if res.status_code != 200:
             raise Exception(f"Chartink error {res.status_code}")
 
