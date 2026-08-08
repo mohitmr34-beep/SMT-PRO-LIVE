@@ -10,10 +10,7 @@ import time
 # -------------------------------
 st.set_page_config(page_title="SMT PRO AI Scanner", layout="wide")
 
-st.markdown("""
-<h2 style='text-align: center;'>SMT PRO AI Trading Terminal</h2>
-<hr>
-""", unsafe_allow_html=True)
+st.markdown("<h2 style='text-align:center;'>SMT PRO AI Trading Terminal</h2><hr>", unsafe_allow_html=True)
 
 # -------------------------------
 # AUTO REFRESH
@@ -27,18 +24,14 @@ if auto_refresh:
 # -------------------------------
 # STOCK SOURCE
 # -------------------------------
-source = st.radio(
-    "Stock Source",
-    ["Manual CSV", "Chartink LIVE"],
-    horizontal=True
-)
+source = st.radio("Stock Source", ["Manual CSV", "Chartink LIVE"], horizontal=True)
 
 # ===============================
 # CSV MODE
 # ===============================
 if source == "Manual CSV":
 
-    uploaded_file = st.file_uploader("Upload Stock List CSV", type=["csv"])
+    uploaded_file = st.file_uploader("Upload Stock CSV", type=["csv"])
 
     if uploaded_file:
         df_symbols = pd.read_csv(uploaded_file)
@@ -71,17 +64,19 @@ else:
 
         session = requests.Session()
 
+        # load cookie
         for part in cookie.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
                 session.cookies.set(k, v, domain="chartink.com")
 
+        # open site to refresh session
         session.get("https://chartink.com")
 
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
         if not xsrf:
-            raise Exception("XSRF token missing")
+            raise Exception("Invalid Cookie / XSRF missing")
 
         headers = {
             "User-Agent": "Mozilla/5.0",
@@ -92,14 +87,10 @@ else:
         }
 
         payload = {
-            "scan_clause": "( {cash} ( ( {cash} ( ( {cash} (  daily close >= daily max( 252 , daily high ) * 0.98 and daily volume > daily sma( daily volume , 20 ) * 1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max( 252 , daily high ) and daily close < daily open and daily volume > daily sma( daily volume , 20 ) * 1.5 ) ) or ( {cash} ( daily open > 1 day ago close * 1.02 and daily volume > daily sma( daily volume , 20 ) * 2 and daily close > daily open ) ) ) ) ) )"
+            "scan_clause": "( {cash} ( ( {cash} ( ( {cash} ( daily close >= daily max(252, daily high)*0.98 and daily volume > daily sma(daily volume,20)*1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max(252, daily high) and daily close < daily open and daily volume > daily sma(daily volume,20)*1.5 ) ) or ( {cash} ( daily open > 1 day ago close*1.02 and daily volume > daily sma(daily volume,20)*2 and daily close > daily open ) ) ) ) ) )"
         }
 
-        res = session.post(
-            "https://chartink.com/screener/process",
-            headers=headers,
-            json=payload
-        )
+        res = session.post("https://chartink.com/screener/process", headers=headers, json=payload)
 
         if res.status_code != 200:
             raise Exception("Chartink fetch failed")
@@ -111,6 +102,9 @@ else:
             sym = row.get("nsecode")
             if sym:
                 symbols.append(sym.upper() + ".NS")
+
+        if not symbols:
+            raise Exception("No stocks returned")
 
         return symbols
 
@@ -158,7 +152,7 @@ def get_data(symbol, timeframe):
         return None
 
 # -------------------------------
-# AI LOGIC
+# AI LOGIC (UNCHANGED)
 # -------------------------------
 def analyze_stock(df):
 
@@ -230,16 +224,9 @@ if st.button("Run AI Scanner"):
     c2.metric("BUY", buy_count)
     c3.metric("SELL", sell_count)
 
-    # COLOR TABLE
-    def color_signal(val):
-        if val == "BUY":
-            return "background-color: green; color: white"
-        elif val == "SELL":
-            return "background-color: red; color: white"
-        return ""
-
+    # TABLE (FIXED - NO STYLER ERROR)
     st.subheader("All Results")
-    st.dataframe(df_results.style.applymap(color_signal, subset=["Signal"]), use_container_width=True)
+    st.data_editor(df_results, use_container_width=True)
 
     # TOP 2
     st.subheader("Top 2 Trades")
@@ -247,6 +234,7 @@ if st.button("Run AI Scanner"):
 
     for _, row in best.iterrows():
         color = "green" if row["Signal"] == "BUY" else "red"
+
         st.markdown(f"""
         <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
         <b>{row['Stock']}</b> - {row['Signal']}<br>
