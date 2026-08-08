@@ -224,8 +224,7 @@ if st.button("🚀 Run AI Scanner"):
 # FOOTER
 # -------------------------------
 st.caption("⚠️ Educational use only")            "column_clause": CHARTINK_COLUMN_CLAUSE
-        }
-
+    
         res = session.post(
             "https://chartink.com/screener/process",
             headers=headers,
