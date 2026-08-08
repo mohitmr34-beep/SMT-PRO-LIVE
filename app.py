@@ -53,7 +53,6 @@ if source == "Manual CSV":
 else:
 
     st.subheader("Chartink LIVE Scanner")
-
     chartink_cookie = st.text_input("Enter Chartink Cookie", type="password")
 
     @st.cache_data(ttl=30)
@@ -64,13 +63,11 @@ else:
 
         session = requests.Session()
 
-        # load cookie
         for part in cookie.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
                 session.cookies.set(k, v, domain="chartink.com")
 
-        # open site to refresh session
         session.get("https://chartink.com")
 
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
@@ -152,7 +149,52 @@ def get_data(symbol, timeframe):
         return None
 
 # -------------------------------
-# AI LOGIC (UNCHANGED)
+# AI SCORE ENGINE
+# -------------------------------
+def calculate_ai_score(df, signal):
+
+    if df is None or len(df) < 50:
+        return 0
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    score = 0
+
+    # Trend
+    if latest["Close"] > df["Close"].rolling(20).mean().iloc[-1]:
+        score += 20
+
+    # Volume
+    if "Volume" in df:
+        avg_vol = df["Volume"].rolling(20).mean().iloc[-1]
+        if latest["Volume"] > 1.5 * avg_vol:
+            score += 20
+
+    # Breakout
+    high_52 = df["High"].rolling(252).max().iloc[-1]
+
+    if signal == "BUY" and latest["Close"] >= 0.98 * high_52:
+        score += 20
+
+    if signal == "SELL" and latest["High"] >= high_52:
+        score += 20
+
+    # Candle strength
+    body = abs(latest["Close"] - latest["Open"])
+    range_ = latest["High"] - latest["Low"]
+
+    if range_ > 0 and body / range_ > 0.6:
+        score += 20
+
+    # Gap
+    if latest["Open"] > prev["Close"] * 1.02:
+        score += 20
+
+    return min(score, 100)
+
+# -------------------------------
+# AI LOGIC
 # -------------------------------
 def analyze_stock(df):
 
@@ -203,47 +245,51 @@ if st.button("Run AI Scanner"):
     for sym in symbols:
         df = get_data(sym, timeframe)
         signal, entry, sl, target = analyze_stock(df)
+        score = calculate_ai_score(df, signal)
 
-        results.append({
-            "Stock": sym,
-            "Signal": signal,
-            "Entry": round(entry, 2) if entry else None,
-            "SL": round(sl, 2) if sl else None,
-            "Target": round(target, 2) if target else None
-        })
+        if signal in ["BUY","SELL"]:
+            results.append({
+                "Stock": sym,
+                "Signal": signal,
+                "Score": score,
+                "Entry": round(entry, 2) if entry else None,
+                "SL": round(sl, 2) if sl else None,
+                "Target": round(target, 2) if target else None
+            })
 
     df_results = pd.DataFrame(results)
 
+    if df_results.empty:
+        st.warning("No trade found")
+        st.stop()
+
+    # SORT
+    df_results = df_results.sort_values(by="Score", ascending=False).reset_index(drop=True)
+
     # METRICS
-    buy_count = len(df_results[df_results["Signal"] == "BUY"])
-    sell_count = len(df_results[df_results["Signal"] == "SELL"])
-    total = len(df_results)
-
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Stocks", total)
-    c2.metric("BUY", buy_count)
-    c3.metric("SELL", sell_count)
+    c1.metric("Total Trades", len(df_results))
+    c2.metric("Best Score", df_results.iloc[0]["Score"])
+    c3.metric("Top Signal", df_results.iloc[0]["Signal"])
 
-    # TABLE (FIXED - NO STYLER ERROR)
-    st.subheader("All Results")
+    # BEST TRADE
+    best = df_results.iloc[0]
+
+    color = "green" if best["Signal"] == "BUY" else "red"
+
+    st.markdown(f"""
+    <div style='padding:20px;border-radius:12px;background:{color};color:white'>
+    <h3>{best['Stock']} - {best['Signal']}</h3>
+    <p><b>AI Score:</b> {best['Score']} / 100</p>
+    <p><b>Entry:</b> {best['Entry']}</p>
+    <p><b>SL:</b> {best['SL']}</p>
+    <p><b>Target:</b> {best['Target']}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # FULL RANKED LIST
+    st.subheader("Ranked Trades")
     st.data_editor(df_results, use_container_width=True)
-
-    # TOP 2
-    st.subheader("Top 2 Trades")
-    best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
-
-    for _, row in best.iterrows():
-        color = "green" if row["Signal"] == "BUY" else "red"
-
-        st.markdown(f"""
-        <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
-        <b>{row['Stock']}</b> - {row['Signal']}<br>
-        Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}
-        </div>
-        """, unsafe_allow_html=True)
-
-    if best.empty:
-        st.warning("No high probability trades")
 
 # -------------------------------
 # FOOTER
