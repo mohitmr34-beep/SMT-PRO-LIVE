@@ -1,4 +1,3 @@
-import re
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -24,7 +23,6 @@ source = st.radio(
 # CSV MODE (UNCHANGED)
 # -------------------------------
 if source == "📂 Manual CSV (OLD)":
-
     uploaded_file = st.file_uploader("📂 Upload Stock List CSV", type=["csv"])
 
     if uploaded_file:
@@ -45,7 +43,6 @@ if source == "📂 Manual CSV (OLD)":
 # CHARTINK LIVE MODE
 # -------------------------------
 else:
-
     st.subheader("🟢 Chartink LIVE Scanner")
 
     chartink_url = st.text_input(
@@ -53,29 +50,16 @@ else:
         "https://chartink.com/screener/master-scanner-18062057"
     )
 
-    chartink_cookie = st.text_input(
-        "Chartink Cookie (required)",
-        type="password"
-    )
-
-    CHARTINK_SCAN_CLAUSE = "( {cash} ( daily close >= daily max(252,daily high)*0.98 ) )"
-
-    CHARTINK_DEBUG_CLAUSE = "groupcount(1 where daily close>=daily max(252,daily high)*0.98)"
-
-    CHARTINK_COLUMN_CLAUSE = (
-        "Daily Close as 'scan-column-default-close', "
-        "Daily Volume as 'scan-column-default-volume'"
-    )
+    chartink_cookie = st.text_input("Chartink Cookie", type="password")
 
     @st.cache_data(ttl=20)
     def get_chartink_symbols(cookie, url):
-
         if not cookie:
-            raise Exception("Chartink cookie required")
+            raise Exception("Cookie required")
 
         session = requests.Session()
 
-        # Load cookies
+        # Load cookie into session
         for part in cookie.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
@@ -86,13 +70,12 @@ else:
             "Referer": url
         }
 
-        # Step 1: Open scanner page
+        # Step 1: open page
         session.get(url, headers=headers)
 
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
-
         if not xsrf:
-            raise Exception("XSRF token missing. Refresh cookie.")
+            raise Exception("XSRF token missing")
 
         headers.update({
             "X-Requested-With": "XMLHttpRequest",
@@ -101,9 +84,146 @@ else:
         })
 
         payload = {
-            "scan_clause": CHARTINK_SCAN_CLAUSE,
-            "debug_clause": CHARTINK_DEBUG_CLAUSE,
-            "column_clause": CHARTINK_COLUMN_CLAUSE
+            "scan_clause": "( {cash} ( daily close >= daily max(252,daily high)*0.98 ) )"
+        }
+
+        res = session.post(
+            "https://chartink.com/screener/process",
+            headers=headers,
+            json=payload
+        )
+
+        # SAFE CHECK
+        if res.status_code != 200:
+            raise Exception(f"Chartink error {res.status_code}")
+
+        data = res.json().get("data", [])
+
+        symbols = []
+        for row in data:
+            sym = row.get("nsecode")
+            if sym:
+                symbols.append(sym.upper() + ".NS")
+
+        if not symbols:
+            raise Exception("No stocks returned")
+
+        return symbols
+
+    if st.button("🔄 Get LIVE Stocks"):
+        try:
+            symbols = get_chartink_symbols(chartink_cookie, chartink_url)
+            st.session_state["symbols"] = symbols
+            st.success(f"Loaded {len(symbols)} stocks")
+        except Exception as e:
+            st.error(f"Chartink LIVE fetch failed: {e}")
+            st.stop()
+
+    elif "symbols" in st.session_state:
+        symbols = st.session_state["symbols"]
+    else:
+        st.stop()
+
+    st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
+
+# -------------------------------
+# TIMEFRAME
+# -------------------------------
+timeframe = st.selectbox("Select Timeframe", ["5m", "15m", "1d"])
+
+# -------------------------------
+# DATA FETCH
+# -------------------------------
+@st.cache_data
+def get_data(symbol, timeframe):
+    try:
+        df = yf.download(symbol, period="5d", interval=timeframe, progress=False)
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df = df.dropna()
+
+        if not all(col in df.columns for col in ["Open","High","Low","Close"]):
+            return None
+
+        return df
+    except:
+        return None
+
+# -------------------------------
+# AI LOGIC (UNCHANGED)
+# -------------------------------
+def analyze_stock(df):
+    if df is None or len(df) < 50:
+        return "NO DATA", None, None, None
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    close = latest["Close"]
+    open_ = latest["Open"]
+    high = latest["High"]
+    low = latest["Low"]
+    prev_close = prev["Close"]
+
+    high_52 = df["High"].rolling(252).max().iloc[-1]
+
+    signal = "WAIT"
+    entry = sl = target = None
+
+    if close >= 0.98 * high_52 and close > open_:
+        signal = "BUY"
+        entry = high
+        sl = low
+        target = entry + (entry - sl) * 2
+
+    elif high >= high_52 and close < open_:
+        signal = "SELL"
+        entry = low
+        sl = high
+        target = entry - (sl - entry) * 2
+
+    elif open_ > prev_close * 1.02:
+        signal = "BUY" if close > open_ else "SELL"
+        entry = high if signal == "BUY" else low
+        sl = low if signal == "BUY" else high
+        target = entry + (entry - sl) * 2 if signal == "BUY" else entry - (sl - entry) * 2
+
+    return signal, entry, sl, target
+
+# -------------------------------
+# RUN SCANNER
+# -------------------------------
+if st.button("🚀 Run AI Scanner"):
+    results = []
+
+    for sym in symbols:
+        df = get_data(sym, timeframe)
+        signal, entry, sl, target = analyze_stock(df)
+
+        results.append({
+            "Stock": sym,
+            "Signal": signal,
+            "Entry": round(entry, 2) if entry else None,
+            "SL": round(sl, 2) if sl else None,
+            "Target": round(target, 2) if target else None
+        })
+
+    df_results = pd.DataFrame(results)
+
+    st.subheader("📊 All Results")
+    st.dataframe(df_results)
+
+    best = df_results[df_results["Signal"].isin(["BUY", "SELL"])].head(2)
+
+    st.subheader("🔥 Top 2 Trades")
+    st.dataframe(best)
+
+# -------------------------------
+# FOOTER
+# -------------------------------
+st.caption("⚠️ Educational use only")            "column_clause": CHARTINK_COLUMN_CLAUSE
         }
 
         res = session.post(
