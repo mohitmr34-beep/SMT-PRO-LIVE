@@ -9,15 +9,18 @@ import time
 # APP CONFIG
 # -------------------------------
 st.set_page_config(page_title="SMT PRO AI Scanner", layout="wide")
-st.title("📊 SMT PRO AI Trading Scanner (LIVE + CSV)")
+
+st.markdown("""
+<h2 style='text-align: center;'>SMT PRO AI Trading Terminal</h2>
+<hr>
+""", unsafe_allow_html=True)
 
 # -------------------------------
-# AUTO REFRESH (5 MIN)
+# AUTO REFRESH
 # -------------------------------
-auto_refresh = st.checkbox("⏱️ Auto Refresh (5 min)", value=False)
+auto_refresh = st.checkbox("Auto Refresh (5 min)", value=False)
 
 if auto_refresh:
-    st.caption("🔄 Auto refresh every 5 minutes running...")
     time.sleep(300)
     st.rerun()
 
@@ -25,17 +28,17 @@ if auto_refresh:
 # STOCK SOURCE
 # -------------------------------
 source = st.radio(
-    "📡 Stock Source",
-    ["📂 Manual CSV (OLD)", "🟢 Chartink LIVE"],
+    "Stock Source",
+    ["Manual CSV", "Chartink LIVE"],
     horizontal=True
 )
 
 # ===============================
-# CSV MODE (UNCHANGED SAFE)
+# CSV MODE
 # ===============================
-if source == "📂 Manual CSV (OLD)":
+if source == "Manual CSV":
 
-    uploaded_file = st.file_uploader("📂 Upload Stock List CSV", type=["csv"])
+    uploaded_file = st.file_uploader("Upload Stock List CSV", type=["csv"])
 
     if uploaded_file:
         df_symbols = pd.read_csv(uploaded_file)
@@ -52,38 +55,33 @@ if source == "📂 Manual CSV (OLD)":
         ]
 
 # ===============================
-# CHARTINK LIVE MODE (FINAL FIX)
+# CHARTINK LIVE MODE
 # ===============================
 else:
 
-    st.subheader("🟢 Chartink LIVE Scanner")
+    st.subheader("Chartink LIVE Scanner")
 
-    chartink_cookie = st.text_input(
-        "🔐 Enter Chartink Cookie",
-        type="password"
-    )
+    chartink_cookie = st.text_input("Enter Chartink Cookie", type="password")
 
     @st.cache_data(ttl=30)
     def get_chartink_symbols(cookie):
 
         if not cookie:
-            raise Exception("❌ Cookie required")
+            raise Exception("Cookie required")
 
         session = requests.Session()
 
-        # Load cookie into session
         for part in cookie.split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
                 session.cookies.set(k, v, domain="chartink.com")
 
-        # Step 1: refresh session
         session.get("https://chartink.com")
 
         xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
         if not xsrf:
-            raise Exception("❌ XSRF token missing (update cookie)")
+            raise Exception("XSRF token missing")
 
         headers = {
             "User-Agent": "Mozilla/5.0",
@@ -93,7 +91,6 @@ else:
             "Referer": "https://chartink.com/"
         }
 
-        # 🔥 FINAL SCAN LOGIC (YOUR STRATEGY)
         payload = {
             "scan_clause": "( {cash} ( ( {cash} ( ( {cash} (  daily close >= daily max( 252 , daily high ) * 0.98 and daily volume > daily sma( daily volume , 20 ) * 1.5 and daily close > daily open ) ) or ( {cash} ( daily high >= daily max( 252 , daily high ) and daily close < daily open and daily volume > daily sma( daily volume , 20 ) * 1.5 ) ) or ( {cash} ( daily open > 1 day ago close * 1.02 and daily volume > daily sma( daily volume , 20 ) * 2 and daily close > daily open ) ) ) ) ) )"
         }
@@ -104,11 +101,8 @@ else:
             json=payload
         )
 
-        if res.status_code == 419:
-            raise Exception("❌ Session expired → update cookie")
-
         if res.status_code != 200:
-            raise Exception(f"❌ Chartink error {res.status_code}")
+            raise Exception("Chartink fetch failed")
 
         data = res.json().get("data", [])
 
@@ -118,27 +112,21 @@ else:
             if sym:
                 symbols.append(sym.upper() + ".NS")
 
-        if not symbols:
-            raise Exception("❌ No stocks returned")
-
         return symbols
 
-    # BUTTON
-    if st.button("🔄 Get LIVE Stocks"):
-
+    if st.button("Get LIVE Stocks"):
         try:
             symbols = get_chartink_symbols(chartink_cookie)
             st.session_state["symbols"] = symbols
-            st.success(f"✅ {len(symbols)} stocks loaded")
-
+            st.success(f"{len(symbols)} stocks loaded")
         except Exception as e:
-            st.error(f"{e}")
+            st.error(str(e))
             st.stop()
 
     elif "symbols" in st.session_state:
         symbols = st.session_state["symbols"]
     else:
-        st.info("Enter cookie → Click 'Get LIVE Stocks'")
+        st.info("Enter cookie and click button")
         st.stop()
 
     st.dataframe(pd.DataFrame({"Stocks": symbols}), use_container_width=True)
@@ -170,7 +158,7 @@ def get_data(symbol, timeframe):
         return None
 
 # -------------------------------
-# AI LOGIC (UNCHANGED)
+# AI LOGIC
 # -------------------------------
 def analyze_stock(df):
 
@@ -191,27 +179,20 @@ def analyze_stock(df):
     signal = "WAIT"
     entry = sl = target = None
 
-    # ATH Breakout
     if close >= 0.98 * high_52 and close > open_:
         signal = "BUY"
         entry = high
         sl = low
         target = entry + (entry - sl) * 2
 
-    # ATH Rejection
     elif high >= high_52 and close < open_:
         signal = "SELL"
         entry = low
         sl = high
         target = entry - (sl - entry) * 2
 
-    # Gap Momentum
     elif open_ > prev_close * 1.02:
-        if close > open_:
-            signal = "BUY"
-        else:
-            signal = "SELL"
-
+        signal = "BUY" if close > open_ else "SELL"
         entry = high if signal == "BUY" else low
         sl = low if signal == "BUY" else high
         target = entry + (entry - sl) * 2 if signal == "BUY" else entry - (sl - entry) * 2
@@ -221,7 +202,7 @@ def analyze_stock(df):
 # -------------------------------
 # RUN SCANNER
 # -------------------------------
-if st.button("🚀 Run AI Scanner"):
+if st.button("Run AI Scanner"):
 
     results = []
 
@@ -239,18 +220,44 @@ if st.button("🚀 Run AI Scanner"):
 
     df_results = pd.DataFrame(results)
 
-    st.subheader("📊 All Results")
-    st.dataframe(df_results, use_container_width=True)
+    # METRICS
+    buy_count = len(df_results[df_results["Signal"] == "BUY"])
+    sell_count = len(df_results[df_results["Signal"] == "SELL"])
+    total = len(df_results)
 
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Stocks", total)
+    c2.metric("BUY", buy_count)
+    c3.metric("SELL", sell_count)
+
+    # COLOR TABLE
+    def color_signal(val):
+        if val == "BUY":
+            return "background-color: green; color: white"
+        elif val == "SELL":
+            return "background-color: red; color: white"
+        return ""
+
+    st.subheader("All Results")
+    st.dataframe(df_results.style.applymap(color_signal, subset=["Signal"]), use_container_width=True)
+
+    # TOP 2
+    st.subheader("Top 2 Trades")
     best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
 
-    st.subheader("🔥 Top 2 Trades")
-    st.dataframe(best, use_container_width=True)
+    for _, row in best.iterrows():
+        color = "green" if row["Signal"] == "BUY" else "red"
+        st.markdown(f"""
+        <div style='padding:15px;border-radius:10px;background:{color};color:white;margin-bottom:10px'>
+        <b>{row['Stock']}</b> - {row['Signal']}<br>
+        Entry: {row['Entry']} | SL: {row['SL']} | Target: {row['Target']}
+        </div>
+        """, unsafe_allow_html=True)
 
     if best.empty:
-        st.warning("No high-probability trades found")
+        st.warning("No high probability trades")
 
 # -------------------------------
 # FOOTER
 # -------------------------------
-st.caption("⚠️ Educational use only. Confirm with live market before trading.")
+st.caption("Educational use only. Confirm before trading.")
