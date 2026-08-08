@@ -2,6 +2,8 @@ import re
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import requests
+from urllib.parse import unquote
 
 # -------------------------------
 # APP CONFIG
@@ -18,28 +20,32 @@ source = st.radio(
     horizontal=True
 )
 
+# -------------------------------
+# CSV MODE (UNCHANGED)
+# -------------------------------
 if source == "📂 Manual CSV (OLD)":
-    # -------------------------------
-    # CSV UPLOAD — ORIGINAL CODE
-    # -------------------------------
+
     uploaded_file = st.file_uploader("📂 Upload Stock List CSV", type=["csv"])
 
     if uploaded_file:
         df_symbols = pd.read_csv(uploaded_file)
 
         if "Symbol" in df_symbols.columns:
-           symbols = [s.strip().upper() + ".NS" for s in df_symbols["Symbol"].dropna()]
+            symbols = [s.strip().upper() + ".NS" for s in df_symbols["Symbol"].dropna()]
         else:
             st.error("CSV must contain 'Symbol' column")
             st.stop()
     else:
-        # Default fallback (F&O stocks)
         symbols = [
             "RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","INFY.NS","TCS.NS",
             "SBIN.NS","LT.NS","AXISBANK.NS","KOTAKBANK.NS","ITC.NS"
         ]
 
+# -------------------------------
+# CHARTINK LIVE MODE
+# -------------------------------
 else:
+
     st.subheader("🟢 Chartink LIVE Scanner")
 
     chartink_url = st.text_input(
@@ -47,63 +53,185 @@ else:
         "https://chartink.com/screener/master-scanner-18062057"
     )
 
-    st.caption(
-        "Uses the actual Chartink /screener/process request captured from your browser. "
-        "Your old CSV analysis engine is not changed."
-    )
-
-    # IMPORTANT:
-    # Do NOT put a real Chartink cookie in this source code.
-    # On Streamlit Cloud, store it as Secrets:
-    # CHARTINK_COOKIE = "your authorized browser Cookie header"
-    #
-    # Optional local use: enter it in the password box below.
-    try:
-        secret_cookie = st.secrets.get("CHARTINK_COOKIE", "")
-    except Exception:
-        secret_cookie = ""
-
     chartink_cookie = st.text_input(
-        "Chartink authorized Cookie (optional if CHARTINK_COOKIE is in Secrets)",
-        value=secret_cookie,
-        type="password",
-        help="Use your own authorized Chartink browser Cookie header. Never publish it."
+        "Chartink Cookie",
+        type="password"
     )
 
-    refresh_seconds = st.number_input(
-        "Refresh interval (seconds)",
-        min_value=15, max_value=300, value=30, step=15
-    )
+    CHARTINK_SCAN_CLAUSE = "( {cash} ( daily close >= daily max(252,daily high)*0.98 ) )"
 
-    # This is the exact scan clause captured from the user's Chartink
-    # Network request. It is independent of HTML scan-clause extraction.
-    CHARTINK_SCAN_CLAUSE = (
-        "( {cash} ( ( {cash} ( ( {cash} ( "
-        " daily close >= daily max( 252 , daily high ) * 0.98 "
-        "and daily volume > daily sma( daily volume , 20 ) * 1.5 "
-        "and daily close > daily open ) ) "
-        "or( {cash} ( daily high >= daily max( 252 , daily high ) "
-        "and daily close < daily open "
-        "and daily volume > daily sma( daily volume , 20 ) * 1.5 ) ) "
-        "or( {cash} ( daily open > 1 day ago close * 1.02 "
-        "and daily volume > daily sma( daily volume , 20 ) * 2 "
-        "and daily close > daily open ) ) ) ) ) )"
-    )
-
-    CHARTINK_DEBUG_CLAUSE = (
-        "groupcount( 1 where daily close >= daily max( 252 , daily high ) * 0.98),"
-        "groupcount( 1 where daily volume > daily sma( daily volume , 20 ) * 1.5),"
-        "groupcount( 1 where daily close > daily open),"
-        "groupcount( 1 where daily high >= daily max( 252 , daily high )),"
-        "groupcount( 1 where daily close < daily open),"
-        "groupcount( 1 where daily volume > daily sma( daily volume , 20 ) * 1.5),"
-        "groupcount( 1 where daily open > 1 day ago close * 1.02),"
-        "groupcount( 1 where daily volume > daily sma( daily volume , 20 ) * 2),"
-        "groupcount( 1 where daily close > daily open)"
-    )
+    CHARTINK_DEBUG_CLAUSE = "groupcount(1 where daily close>=daily max(252,daily high)*0.98)"
 
     CHARTINK_COLUMN_CLAUSE = (
-        " Daily Close as 'scan-column-default-close',"
+        "Daily Close as 'scan-column-default-close', "
+        "Daily Volume as 'scan-column-default-volume'"
+    )
+
+    @st.cache_data(ttl=20)
+    def get_chartink_symbols(cookie):
+
+        session = requests.Session()
+
+        for part in cookie.split(";"):
+            if "=" in part:
+                k, v = part.strip().split("=", 1)
+                session.cookies.set(k, v, domain="chartink.com")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": chartink_url
+        }
+
+        # open page
+        session.get(chartink_url, headers=headers)
+
+        xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
+
+        headers.update({
+            "X-Requested-With": "XMLHttpRequest",
+            "X-XSRF-TOKEN": xsrf
+        })
+
+        payload = {
+            "scan_clause": CHARTINK_SCAN_CLAUSE,
+            "debug_clause": CHARTINK_DEBUG_CLAUSE,
+            "column_clause": CHARTINK_COLUMN_CLAUSE
+        }
+
+        res = session.post(
+            "https://chartink.com/screener/process",
+            headers=headers,
+            json=payload
+        )
+
+        if res.status_code != 200:
+            raise Exception(f"Chartink error {res.status_code}")
+
+        data = res.json()["data"]
+
+        symbols = []
+        for row in data:
+            sym = row.get("nsecode")
+            if sym:
+                symbols.append(sym + ".NS")
+
+        return symbols
+
+    if st.button("🔄 Get LIVE Stocks"):
+        try:
+            symbols = get_chartink_symbols(chartink_cookie)
+            st.session_state["symbols"] = symbols
+        except Exception as e:
+            st.error(f"Chartink LIVE fetch failed: {e}")
+            st.stop()
+
+    elif "symbols" in st.session_state:
+        symbols = st.session_state["symbols"]
+    else:
+        st.stop()
+
+    st.success(f"Loaded {len(symbols)} stocks")
+
+# -------------------------------
+# TIMEFRAME
+# -------------------------------
+timeframe = st.selectbox("Select Timeframe", ["5m", "15m", "1d"])
+
+# -------------------------------
+# DATA FETCH
+# -------------------------------
+@st.cache_data
+def get_data(symbol, timeframe):
+    try:
+        df = yf.download(symbol, period="5d", interval=timeframe, progress=False)
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        df = df.dropna()
+
+        if not all(col in df.columns for col in ["Open","High","Low","Close"]):
+            return None
+
+        return df
+    except:
+        return None
+
+# -------------------------------
+# AI LOGIC (UNCHANGED)
+# -------------------------------
+def analyze_stock(df):
+
+    if df is None or len(df) < 50:
+        return "NO DATA", None, None, None
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    close = latest["Close"]
+    open_ = latest["Open"]
+    high = latest["High"]
+    low = latest["Low"]
+    prev_close = prev["Close"]
+
+    high_52 = df["High"].rolling(252).max().iloc[-1]
+
+    signal = "WAIT"
+    entry = sl = target = None
+
+    if close >= 0.98 * high_52 and close > open_:
+        signal = "BUY"
+        entry = high
+        sl = low
+        target = entry + (entry - sl) * 2
+
+    elif high >= high_52 and close < open_:
+        signal = "SELL"
+        entry = low
+        sl = high
+        target = entry - (sl - entry) * 2
+
+    elif open_ > prev_close * 1.02:
+        signal = "BUY" if close > open_ else "SELL"
+        entry = high if signal == "BUY" else low
+        sl = low if signal == "BUY" else high
+        target = entry + (entry - sl) * 2 if signal == "BUY" else entry - (sl - entry) * 2
+
+    return signal, entry, sl, target
+
+# -------------------------------
+# RUN SCANNER
+# -------------------------------
+if st.button("🚀 Run AI Scanner"):
+
+    results = []
+
+    for sym in symbols:
+        df = get_data(sym, timeframe)
+        signal, entry, sl, target = analyze_stock(df)
+
+        results.append({
+            "Stock": sym,
+            "Signal": signal,
+            "Entry": round(entry,2) if entry else None,
+            "SL": round(sl,2) if sl else None,
+            "Target": round(target,2) if target else None
+        })
+
+    df_results = pd.DataFrame(results)
+
+    st.subheader("📊 All Results")
+    st.dataframe(df_results)
+
+    best = df_results[df_results["Signal"].isin(["BUY","SELL"])].head(2)
+
+    st.subheader("🔥 Top 2 Trades")
+    st.dataframe(best)
+
+# -------------------------------
+# FOOTER
+# -------------------------------
+st.caption("⚠️ Educational use only")        " Daily Close as 'scan-column-default-close',"
         " Daily close - 1 candle ago close / 1 candle ago close * 100"
         " as 'scan-column-default-percent-change',"
         " filternumber( daily close > 1 day ago close,1)"
